@@ -12,7 +12,19 @@ const pool = require('./db');
 const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY
 const JWT_SECRET = process.env.JWT_SECRET
 
-app.use(cors())
+const allowedOrigins = process.env.ALLOWED_ORIGINS.split(',') || []
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true)
+    } else {
+      callback(new Error('Origen no permitido por CORS'))
+    }
+  },
+  methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}))
 app.use(express.json())
 
 
