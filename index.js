@@ -2,40 +2,19 @@ require('dotenv').config()
 
 const express = require('express')
 const cors = require('cors')
-const Database = require('better-sqlite3')
 const axios = require('axios')
 const validator = require('validator')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 
 const app = express()
-const db = new Database('./contact.db')
+const pool = require('./db');
 const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY
 const JWT_SECRET = process.env.JWT_SECRET
 
 app.use(cors())
 app.use(express.json())
 
-
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS contact_requests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    email TEXT,
-    phone TEXT,
-    message TEXT,
-    status TEXT DEFAULT 'nuevo',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`).run()
-
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE,
-    password TEXT
-  );
-`).run()
 
 const auth = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1]
@@ -49,20 +28,46 @@ const auth = (req, res, next) => {
   }
 }
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { email, password } = req.body
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email)
 
-  if (!user || !bcrypt.compareSync(password, user.password)) {
-    return res.status(401).json({ message: 'Credenciales inválidas' })
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email])
+    const user = result.rows[0]
+
+    if (!user) {
+      return res.status(401).json({ message: 'Usuario no encontrado' })
+    }
+
+    const valid = bcrypt.compareSync(password, user.password)
+    if (!valid) {
+      return res.status(401).json({ message: 'Contraseña incorrecta' })
+    }
+
+    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '2h' })
+    res.json({ token })
+  } catch (err) {
+    console.error('🔥 Error en /api/login:', err)
+    res.status(500).json({ message: 'Error interno del servidor' })
   }
-
-  const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, {
-    expiresIn: '2h'
-  })
-
-  res.json({ token })
 })
+
+app.post('/api/register', async (req, res) => {
+  const { email, password } = req.body
+  const hashed = bcrypt.hashSync(password, 10)
+
+  try {
+    await pool.query(
+      'INSERT INTO users (email, password) VALUES ($1, $2)',
+      [email, hashed]
+    )
+    res.status(201).json({ message: 'Usuario creado correctamente' })
+  } catch (err) {
+    console.error('Error al registrar usuario:', err)
+    res.status(500).json({ message: 'Error al registrar usuario' })
+  }
+})
+
 
 app.post('/api/contact', async (req, res) => {
   const { name, email, phone, message, recaptchaToken } = req.body
@@ -94,21 +99,21 @@ app.post('/api/contact', async (req, res) => {
   }
 
   // Guardar
-  const stmt = db.prepare(`
-    INSERT INTO contact_requests (name, email, phone, message)
-    VALUES (?, ?, ?, ?)
-  `)
-  stmt.run(cleanName, cleanEmail, cleanPhone, cleanMessage)
+  await pool.query(
+    `INSERT INTO contact_requests (name, email, phone, message) VALUES ($1, $2, $3, $4)`,
+    [cleanName, cleanEmail, cleanPhone, cleanMessage]
+  )
 
   res.status(200).json({ message: 'Enviado correctamente' })
 })
 
-app.get('/api/leads', auth, (req, res) => {
-  const leads = db.prepare(`
-    SELECT * FROM contact_requests ORDER BY created_at DESC
-  `).all()
-
-  res.json(leads)
+app.get('/api/leads', auth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM contact_requests ORDER BY created_at DESC')
+    res.json(result.rows)
+  } catch (err) {
+    res.status(500).json({ message: 'Error al obtener leads' })
+  }
 })
 
 app.patch('/api/leads/:id', auth, (req, res) => {
@@ -120,7 +125,7 @@ app.patch('/api/leads/:id', auth, (req, res) => {
     return res.status(400).json({ message: 'Estado inválido' })
   }
 
-  db.prepare(`UPDATE contact_requests SET status = ? WHERE id = ?`).run(status, id)
+  pool.query('UPDATE contact_requests SET status = $1 WHERE id = $2', [status, id])
   res.json({ message: 'Estado actualizado' })
 })
 
